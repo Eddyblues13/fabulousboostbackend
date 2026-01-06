@@ -1,0 +1,196 @@
+<?php
+
+namespace App\Http\Controllers\API;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+
+class CurrencyController extends Controller
+{
+    public function fetchCurrencies()
+    {
+        // Map of currency symbols
+        $currencySymbols = [
+            'USD' => '$',
+            'AED' => 'د.إ',
+            'AFN' => '؋',
+            'ALL' => 'L',
+            'AMD' => '֏',
+            'ANG' => 'ƒ',
+            'AOA' => 'Kz',
+            'ARS' => '$',
+            'AUD' => 'A$',
+            'AWG' => 'ƒ',
+            'AZN' => '₼',
+            'BAM' => 'KM',
+            'BBD' => 'Bds$',
+            'BDT' => '৳',
+            'BGN' => 'лв',
+            'BHD' => '.د.ب',
+            'BIF' => 'FBu',
+            'BMD' => '$',
+            'BND' => '$',
+            'BOB' => 'Bs.',
+            'BRL' => 'R$',
+            'BSD' => '$',
+            'BTN' => 'Nu.',
+            'BWP' => 'P',
+            'BYN' => 'Br',
+            'BZD' => '$',
+            'CAD' => 'C$',
+            'CHF' => 'CHF',
+            'CLP' => '$',
+            'CNY' => '¥',
+            'COP' => '$',
+            'CRC' => '₡',
+            'CUP' => '₱',
+            'CVE' => '$',
+            'CZK' => 'Kč',
+            'DJF' => 'Fdj',
+            'DKK' => 'kr',
+            'DOP' => 'RD$',
+            'DZD' => 'دج',
+            'EGP' => 'E£',
+            'ERN' => 'Nfk',
+            'ETB' => 'Br',
+            'EUR' => '€',
+            'FJD' => '$',
+            'FKP' => '£',
+            'GBP' => '£',
+            'GEL' => '₾',
+            'GHS' => '₵',
+            'GIP' => '£',
+            'GMD' => 'D',
+            'GNF' => 'FG',
+            'GTQ' => 'Q',
+            'GYD' => '$',
+            'HKD' => 'HK$',
+            'HNL' => 'L',
+            'HRK' => 'kn',
+            'HTG' => 'G',
+            'HUF' => 'Ft',
+            'IDR' => 'Rp',
+            'ILS' => '₪',
+            'INR' => '₹',
+            'IQD' => 'ع.د',
+            'IRR' => '﷼',
+            'ISK' => 'kr',
+            'JMD' => '$',
+            'JOD' => 'د.ا',
+            'JPY' => '¥',
+            'KES' => 'Sh',
+            'KGS' => 'с',
+            'KHR' => '៛',
+            'KMF' => 'CF',
+            'KPW' => '₩',
+            'KRW' => '₩',
+            'KWD' => 'د.ك',
+            'KYD' => '$',
+            'KZT' => '₸',
+            'LAK' => '₭',
+            'LBP' => 'ل.ل',
+            'LKR' => 'Rs',
+            'LRD' => '$',
+            'LSL' => 'L',
+            'LYD' => 'ل.د',
+            'MAD' => 'د.م.',
+            'MDL' => 'L',
+            'MGA' => 'Ar',
+            'MKD' => 'ден',
+            'MMK' => 'Ks',
+            'MNT' => '₮',
+            'MOP' => 'P',
+            'MRU' => 'UM',
+            'MUR' => '₨',
+            'MVR' => 'Rf',
+            'MWK' => 'MK',
+            'MXN' => '$',
+            'MYR' => 'RM',
+            'MZN' => 'MT',
+            'NAD' => '$',
+            'NGN' => '₦',
+            'NIO' => 'C$',
+            'NOK' => 'kr',
+            'NPR' => '₨',
+            'NZD' => '$',
+            'OMR' => 'ر.ع.',
+            'PAB' => 'B/.',
+            'PEN' => 'S/',
+            'PGK' => 'K',
+            'PHP' => '₱',
+            'PKR' => '₨',
+            'PLN' => 'zł',
+            'PYG' => '₲',
+            'QAR' => 'ر.ق',
+            'RON' => 'lei',
+            'RSD' => 'din',
+            'RUB' => '₽',
+            'RWF' => 'FRw',
+            'SAR' => 'ر.س',
+            'SBD' => '$',
+            'SCR' => '₨',
+            'SDG' => 'ج.س.',
+            'SEK' => 'kr',
+            'SGD' => '$',
+            'SHP' => '£',
+            'SLL' => 'Le',
+            'SOS' => 'Sh',
+            'SRD' => '$',
+            'SSP' => '£',
+            'STN' => 'Db',
+            'SYP' => '£',
+            'SZL' => 'L',
+            'THB' => '฿',
+            'TJS' => 'SM',
+            'TMT' => 'm',
+            'TND' => 'د.ت',
+            'TOP' => 'T$',
+            'TRY' => '₺',
+            'TTD' => 'TT$',
+            'TVD' => '$',
+            'TWD' => 'NT$',
+            'TZS' => 'Sh',
+            'UAH' => '₴',
+            'UGX' => 'Sh',
+            'UYU' => '$',
+            'UZS' => 'soʻm',
+            'VES' => 'Bs.S',
+            'VND' => '₫',
+            'VUV' => 'Vt',
+            'WST' => 'T',
+            'XAF' => 'FCFA',
+            'XCD' => '$',
+            'XOF' => 'CFA',
+            'XPF' => '₣',
+            'YER' => '﷼',
+            'ZAR' => 'R',
+            'ZMW' => 'ZK',
+            'ZWL' => '$',
+        ];
+
+        $currencies = Cache::remember('currencies', now()->addDay(), function () use ($currencySymbols) {
+            $response = Http::get('https://open.er-api.com/v6/latest/USD');
+            
+            if ($response->successful()) {
+                $rates = $response->json()['rates'];
+
+                return collect($rates)->map(function ($rate, $code) use ($currencySymbols) {
+                    return [
+                        'code'   => $code,
+                        'rate'   => $rate,
+                        'symbol' => $currencySymbols[$code] ?? $code
+                    ];
+                })->values();
+            }
+
+            return [];
+        });
+
+        return response()->json([
+            'success' => true,
+            'currencies' => $currencies
+        ]);
+    }
+}
