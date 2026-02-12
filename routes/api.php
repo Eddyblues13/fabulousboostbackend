@@ -15,7 +15,6 @@ use App\Http\Controllers\API\CategoryController;
 use App\Http\Controllers\API\CurrencyController;
 use App\Http\Controllers\API\RegisterController;
 use App\Http\Controllers\API\AffiliateController;
-use App\Http\Controllers\API\ChildPanelController;
 use App\Http\Controllers\API\Admin\AdminController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\Admin\SendMailController;
@@ -111,22 +110,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Track referral visits
     Route::get('/affiliate/track/{code}', [AffiliateController::class, 'trackVisit'])->withoutMiddleware(['auth:sanctum']);
 
-    // Child Panel Routes
-    Route::prefix('child-panels')->group(function () {
-        Route::get('/', [ChildPanelController::class, 'index']);
-        Route::post('/', [ChildPanelController::class, 'store']);
-        Route::get('/{id}', [ChildPanelController::class, 'show']);
-        Route::put('/{id}', [ChildPanelController::class, 'update']);
-        Route::delete('/{id}', [ChildPanelController::class, 'destroy']);
-        Route::get('/{id}/stats', [ChildPanelController::class, 'getStats']);
-        Route::get('/{id}/users', [ChildPanelController::class, 'getUsers']);
-        Route::get('/{id}/orders', [ChildPanelController::class, 'getOrders']);
-        Route::get('/{id}/transactions', [ChildPanelController::class, 'getTransactions']);
-        Route::post('/{id}/add-balance', [ChildPanelController::class, 'addBalance']);
-        Route::post('/{id}/pay-subscription', [ChildPanelController::class, 'paySubscription']);
-        Route::post('/{id}/generate-api-key', [ChildPanelController::class, 'generateApiKey']);
-        Route::post('/{id}/toggle-status', [ChildPanelController::class, 'toggleStatus']);
-    });
+
 
     // Payment endpoints
     Route::post('/payment/initiate', [PaymentController::class, 'initiatePayment']);

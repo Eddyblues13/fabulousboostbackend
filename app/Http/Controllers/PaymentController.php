@@ -378,7 +378,6 @@ class PaymentController extends Controller
         } catch (\Exception $e) {
             Log::error('💥 Payment verification failed: ' . $e->getMessage(), [
                 'request' => $request->all(),
-                'user_id' => Auth::id(),
                 'exception' => $e
             ]);
 
@@ -577,6 +576,90 @@ class PaymentController extends Controller
                 'message' => 'Failed to fetch payment history',
                 'error' => $e->getMessage()
             ], 500);
+        }
+    }
+
+    /**
+     * Calculate and credit affiliate commission.
+     *
+     * @param User $user
+     * @param float $amount
+     * @return void
+     */
+    private function calculateAffiliateCommission(User $user, float $amount): void
+    {
+        try {
+            // Check if user was referred by an affiliate
+            $referral = AffiliateReferral::where('referred_user_id', $user->id)
+                ->where('status', 'active')
+                ->first();
+
+            if (!$referral) {
+                Log::debug('No active affiliate referral found for user', ['user_id' => $user->id]);
+                return;
+            }
+
+            // Get the affiliate program
+            $affiliateProgram = AffiliateProgram::where('user_id', $referral->referrer_id)
+                ->where('is_active', true)
+                ->first();
+
+            if (!$affiliateProgram) {
+                Log::debug('No active affiliate program found for referrer', [
+                    'referrer_id' => $referral->referrer_id
+                ]);
+                return;
+            }
+
+            // Calculate commission (default 5% if not specified)
+            $commissionRate = $affiliateProgram->commission_rate ?? 5.0;
+            $commissionAmount = ($amount * $commissionRate) / 100;
+
+            // Credit the referrer's affiliate balance
+            $referrer = User::find($referral->referrer_id);
+            if ($referrer) {
+                // Update affiliate program earnings
+                $affiliateProgram->total_earnings += $commissionAmount;
+                $affiliateProgram->available_balance += $commissionAmount;
+                $affiliateProgram->save();
+
+                // Update referral record
+                $referral->total_commission += $commissionAmount;
+                $referral->save();
+
+                // Create a transaction record for the commission
+                Transaction::create([
+                    'user_id' => $referrer->id,
+                    'transaction_id' => 'COMM_' . uniqid(),
+                    'amount' => $commissionAmount,
+                    'currency' => $user->currency ?? 'NGN',
+                    'charge' => 0.00,
+                    'transaction_type' => 'affiliate_commission',
+                    'description' => "Affiliate commission from {$user->first_name} {$user->last_name}'s deposit",
+                    'status' => 'completed',
+                    'payment_method' => 'affiliate',
+                    'meta' => json_encode([
+                        'referred_user_id' => $user->id,
+                        'deposit_amount' => $amount,
+                        'commission_rate' => $commissionRate,
+                    ]),
+                ]);
+
+                Log::info('💰 Affiliate commission credited', [
+                    'referrer_id' => $referrer->id,
+                    'referred_user_id' => $user->id,
+                    'deposit_amount' => $amount,
+                    'commission_amount' => $commissionAmount,
+                    'commission_rate' => $commissionRate,
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::error('💥 Affiliate commission calculation failed: ' . $e->getMessage(), [
+                'user_id' => $user->id,
+                'amount' => $amount,
+                'exception' => $e
+            ]);
+            // Don't throw the exception - we don't want to fail the payment if commission fails
         }
     }
 }

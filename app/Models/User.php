@@ -5,7 +5,6 @@ namespace App\Models;
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use App\Models\Order;
 use App\Models\AffiliateProgram;
-use App\Models\ChildPanel;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -98,10 +97,5 @@ class User extends Authenticatable
     public function referrals()
     {
         return $this->hasMany(User::class, 'referred_by');
-    }
-
-    public function childPanels()
-    {
-        return $this->hasMany(ChildPanel::class, 'parent_user_id');
     }
 }

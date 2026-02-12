@@ -78,7 +78,7 @@ class OrderController extends Controller
 
             // 3. Check if service exists and is active
             $service = Service::userRate()->where('id', $request->service)
-                ->where('status', 1) // Active service
+                ->where('service_status', 1) // Active service
                 ->first();
 
             if (!$service) {
@@ -233,11 +233,11 @@ class OrderController extends Controller
 
             // 11. Send notification for successful order
             if ($order->status !== Order::STATUS_CANCELLED) {
-                CreateGeneralNotificationJob::dispatch([
+                CreateGeneralNotificationJob::dispatchSync([
                     'user_id' => $user->id,
                     'type' => 'order',
                     'title' => 'Order Placed Successfully',
-                    'message' => "Your order #{$order->id} for {$service->service_title} has been placed successfully. Amount charged: $$price.",
+                    'message' => "Your order #{$order->id} for {$service->service_title} has been placed successfully. Amount charged: \${$price}.",
                 ]);
             }
 
@@ -259,12 +259,25 @@ class OrderController extends Controller
             Log::error('Order creation failed', [
                 'user_id' => Auth::id(),
                 'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
                 'trace' => $e->getTraceAsString()
             ]);
 
+            // Return detailed error in development
+            $errorMessage = 'System error occurred. Please try again or contact support if problem persists.';
+            if (config('app.debug')) {
+                $errorMessage .= ' Error: ' . $e->getMessage();
+            }
+
             return response()->json([
                 'status' => 'error',
-                'message' => 'System error occurred. Please try again or contact support if problem persists.'
+                'message' => $errorMessage,
+                'debug' => config('app.debug') ? [
+                    'error' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine()
+                ] : null
             ], 500);
         }
     }

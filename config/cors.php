@@ -16,8 +16,8 @@ return [
         'http://localhost:5173',
         'http://127.0.0.1:5173',
         'http://127.0.0.1:8000',
-        'https://www.boostelix.com',
-        'https://boostelix.com', // Also allow without www
+        'https://www.fabulousboost.com',
+        'https://fabulousboost.com', // Also allow without www
     ],
 
     'allowed_origins_patterns' => [],

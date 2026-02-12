@@ -117,6 +117,8 @@ class ManageUserController extends Controller
 
             DB::beginTransaction();
 
+            $oldBalance = $user->balance;
+
             if ($request->action === 'add') {
                 $user->balance += $request->amount;
             } elseif ($request->action === 'subtract') {
@@ -131,14 +133,21 @@ class ManageUserController extends Controller
 
             $user->save();
 
-            // Optionally log the transaction
-            DB::table('balance_logs')->insert([
+            // Create transaction record instead of balance_logs
+            Transaction::create([
                 'user_id' => $user->id,
-                'action' => $request->action,
+                'transaction_id' => 'ADJ_' . time() . '_' . str()->random(10),
+                'transaction_type' => $request->action === 'add' ? 'Credit' : 'Debit',
                 'amount' => $request->amount,
-                'notes' => $request->notes,
-                'created_at' => now(),
-                'updated_at' => now(),
+                'charge' => 0,
+                'description' => $request->notes ?? ($request->action === 'add' ? 'Balance added by admin' : 'Balance deducted by admin'),
+                'status' => 'completed',
+                'meta' => json_encode([
+                    'action' => $request->action,
+                    'old_balance' => $oldBalance,
+                    'new_balance' => $user->balance,
+                    'adjusted_by' => 'admin'
+                ]),
             ]);
 
             DB::commit();
@@ -156,12 +165,16 @@ class ManageUserController extends Controller
             ], 422);
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('Balance adjustment failed', ['error' => $e->getMessage()]);
+            Log::error('Balance adjustment failed', [
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
 
             return response()->json([
                 'status' => 'error',
                 'message' => 'Something went wrong during balance adjustment.',
-                'error' => $e->getMessage(),
+                'error' => config('app.debug') ? $e->getMessage() : 'Internal server error',
             ], 500);
         }
     }
