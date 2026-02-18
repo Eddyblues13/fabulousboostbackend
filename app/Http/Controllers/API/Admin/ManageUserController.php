@@ -20,19 +20,27 @@ class ManageUserController extends Controller
 
     public function index(Request $request)
     {
-        // Optional filter by name or email
         $query = User::query();
 
         if ($request->has('search')) {
             $search = $request->input('search');
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
-                    ->orWhere('email', 'like', "%{$search}%");
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhere('username', 'like', "%{$search}%");
             });
         }
 
-        // Paginate results (default: 10 per page)
-        $users = $query->paginate($request->input('per_page', 10));
+        if ($request->has('status')) {
+            $status = $request->input('status');
+            if ($status === 'active') {
+                $query->where('status', 1);
+            } elseif ($status === 'banned') {
+                $query->where('status', 0);
+            }
+        }
+
+        $users = $query->latest()->paginate($request->input('per_page', 15));
 
         return response()->json($users);
     }
