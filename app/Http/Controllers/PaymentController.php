@@ -11,6 +11,7 @@ use App\Models\AffiliateReferral;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 
 class PaymentController extends Controller
 {
@@ -24,7 +25,7 @@ class PaymentController extends Controller
     {
         $validated = $request->validate([
             'amount' => 'required|numeric|min:1',
-            'payment_method' => 'required|string|in:flutterwave,paystack',
+            'payment_method' => 'required|string|in:flutterwave,paystack,korapay',
         ]);
 
         // Validate payment method configuration
@@ -39,6 +40,13 @@ class PaymentController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Paystack payment is not properly configured',
+            ], 500);
+        }
+
+        if ($validated['payment_method'] === 'korapay' && empty(config('services.korapay.secret_key'))) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Korapay payment is not properly configured',
             ], 500);
         }
 
@@ -197,12 +205,68 @@ class PaymentController extends Controller
                         'amount' => $payment->amount,
                         'new_balance' => $user->balance
                     ]);
+
+                    // 💰 Calculate and credit affiliate commission
+                    $this->calculateAffiliateCommission($user, $payment->amount);
                 } elseif (in_array($normalizedStatus, ['cancelled', 'failed'])) {
                     $payment->update(['status' => 'failed']);
                     Log::info('❌ Payment failed', ['transaction_id' => $payment->id]);
                 } else {
                     $payment->update(['status' => 'pending']);
                     Log::info('⏳ Payment pending', ['transaction_id' => $payment->id, 'status' => $normalizedStatus]);
+                }
+            } elseif ($payment->payment_method === 'korapay') {
+                // Handle Korapay payment verification
+                if ($normalizedStatus === 'successful' || $normalizedStatus === 'completed' || $normalizedStatus === 'success') {
+                    $verification = $this->verifyKorapayPayment($reference);
+
+                    if (!$verification || !$verification['status']) {
+                        Log::error('❌ Korapay verification failed', ['response' => $verification]);
+                        throw new \Exception('Korapay payment verification failed');
+                    }
+
+                    $korapayStatus = strtolower($verification['data']['status'] ?? '');
+                    $amountPaid = $verification['data']['amount'] ?? 0;
+                    $expectedAmount = $payment->amount;
+
+                    Log::info('🔍 Korapay verification result', [
+                        'korapay_status' => $korapayStatus,
+                        'amount_paid' => $amountPaid,
+                        'expected_amount' => $expectedAmount
+                    ]);
+
+                    if ($korapayStatus !== 'success') {
+                        throw new \Exception('Payment not confirmed by Korapay. Status: ' . $korapayStatus);
+                    }
+
+                    if (abs($amountPaid - $expectedAmount) > 0.01) {
+                        throw new \Exception('Payment amount mismatch. Paid: ' . $amountPaid . ', Expected: ' . $expectedAmount);
+                    }
+
+                    $payment->update([
+                        'status' => 'completed',
+                        'meta' => json_encode($verification['data'] ?? []),
+                    ]);
+
+                    $user = $payment->user;
+                    $user->balance += $payment->amount;
+                    $user->save();
+
+                    Log::info('💰 Korapay payment completed successfully', [
+                        'transaction_id' => $payment->id,
+                        'user_id' => $user->id,
+                        'amount' => $payment->amount,
+                        'new_balance' => $user->balance
+                    ]);
+
+                    // 💰 Calculate and credit affiliate commission
+                    $this->calculateAffiliateCommission($user, $payment->amount);
+                } elseif (in_array($normalizedStatus, ['cancelled', 'failed'])) {
+                    $payment->update(['status' => 'failed']);
+                    Log::info('❌ Korapay payment failed', ['transaction_id' => $payment->id]);
+                } else {
+                    $payment->update(['status' => 'pending']);
+                    Log::info('⏳ Korapay payment pending', ['transaction_id' => $payment->id, 'status' => $normalizedStatus]);
                 }
             } else {
                 // For Paystack and other payment methods
@@ -348,6 +412,51 @@ class PaymentController extends Controller
                         'verification_response' => $verification
                     ]);
                 }
+            } elseif (
+                $transaction->payment_method === 'korapay' &&
+                in_array($validated['status'], ['successful', 'completed', 'success'])
+            ) {
+                // 🔍 Verify via Korapay
+                $verification = $this->verifyKorapayPayment($validated['transaction_id']);
+
+                if ($verification && $verification['status']) {
+                    $korapayStatus = strtolower($verification['data']['status'] ?? '');
+
+                    Log::info('🔍 Korapay verification result', [
+                        'korapay_status' => $korapayStatus,
+                        'transaction_id' => $validated['transaction_id']
+                    ]);
+
+                    if ($korapayStatus === 'success') {
+                        $transaction->update([
+                            'status' => 'completed',
+                            'meta' => json_encode($verification['data']),
+                        ]);
+
+                        if ($transaction->user) {
+                            $transaction->user->increment('balance', $transaction->amount);
+                            Log::info('💰 User balance credited (Korapay)', [
+                                'user_id' => $transaction->user_id,
+                                'amount' => $transaction->amount,
+                                'new_balance' => $transaction->user->balance
+                            ]);
+
+                            $this->calculateAffiliateCommission($transaction->user, $transaction->amount);
+                        }
+                    } else {
+                        $transaction->update(['status' => 'failed']);
+                        Log::info('❌ Korapay payment failed', [
+                            'transaction_id' => $transaction->id,
+                            'korapay_status' => $korapayStatus
+                        ]);
+                    }
+                } else {
+                    $transaction->update(['status' => 'failed']);
+                    Log::error('❌ Korapay verification failed', [
+                        'transaction_id' => $transaction->id,
+                        'verification_response' => $verification
+                    ]);
+                }
             } else {
                 // Other payment methods
                 $newStatus = in_array($validated['status'], ['successful', 'completed'])
@@ -403,6 +512,8 @@ class PaymentController extends Controller
                 return $this->createFlutterwavePaymentLink($data);
             case 'paystack':
                 return $this->createPaystackPaymentLink($data);
+            case 'korapay':
+                return $this->createKorapayPaymentLink($data);
             default:
                 throw new \InvalidArgumentException("Unsupported payment method: {$method}");
         }
@@ -545,6 +656,322 @@ class PaymentController extends Controller
                 'transaction_id' => $transactionId
             ]);
             throw $e;
+        }
+    }
+
+    /**
+     * Create a Korapay payment link using Checkout Redirect.
+     *
+     * @param array $data
+     * @return string|null
+     */
+    private function createKorapayPaymentLink(array $data): ?string
+    {
+        try {
+            $korapayKey = config('services.korapay.secret_key');
+
+            if (empty($korapayKey)) {
+                throw new \RuntimeException('Korapay secret key is not configured');
+            }
+
+            Log::debug('🔗 Creating Korapay payment link', ['data' => $data]);
+
+            $client = new Client();
+            $response = $client->post('https://api.korapay.com/merchant/api/v1/charges/initialize', [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $korapayKey,
+                    'Content-Type' => 'application/json',
+                ],
+                'json' => [
+                    'amount' => $data['amount'],
+                    'redirect_url' => $data['redirect_url'],
+                    'currency' => $data['currency'] ?? 'NGN',
+                    'reference' => $data['tx_ref'],
+                    'narration' => 'Payment for ' . ($data['customer']['name'] ?? 'User'),
+                    'channels' => ['card', 'bank_transfer', 'pay_with_bank', 'mobile_money'],
+                    'default_channel' => 'card',
+                    'customer' => [
+                        'email' => $data['customer']['email'],
+                        'name' => $data['customer']['name'] ?? '',
+                    ],
+                    'notification_url' => rtrim(config('app.url'), '/') . '/api/payment/korapay/webhook',
+                    'merchant_bears_cost' => true,
+                ],
+            ]);
+
+            $body = json_decode((string)$response->getBody(), true);
+
+            if (!isset($body['status']) || !$body['status']) {
+                Log::error('❌ Korapay payment failed', ['response' => $body]);
+                throw new \RuntimeException($body['message'] ?? 'Korapay payment initialization failed');
+            }
+
+            Log::info('✅ Korapay payment link created', [
+                'transaction_ref' => $data['tx_ref'],
+                'checkout_url' => $body['data']['checkout_url'] ?? null
+            ]);
+
+            return $body['data']['checkout_url'] ?? null;
+        } catch (\Exception $e) {
+            Log::error('💥 Korapay payment error: ' . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Verify Korapay payment.
+     *
+     * @param string $reference
+     * @return array|null
+     */
+    private function verifyKorapayPayment(string $reference): ?array
+    {
+        try {
+            $korapayKey = config('services.korapay.secret_key');
+
+            if (empty($korapayKey)) {
+                throw new \RuntimeException('Korapay secret key is not configured');
+            }
+
+            Log::debug('🔍 Verifying Korapay payment', ['reference' => $reference]);
+
+            $client = new Client();
+            $response = $client->get("https://api.korapay.com/merchant/api/v1/charges/{$reference}", [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $korapayKey,
+                    'Content-Type' => 'application/json',
+                ],
+            ]);
+
+            $body = json_decode($response->getBody(), true);
+
+            if (!isset($body['status']) || !$body['status']) {
+                Log::error('❌ Korapay verification failed', ['response' => $body]);
+                throw new \RuntimeException($body['message'] ?? 'Korapay payment verification failed');
+            }
+
+            Log::info('✅ Korapay payment verified successfully', [
+                'reference' => $reference,
+                'status' => $body['data']['status'] ?? 'unknown'
+            ]);
+
+            return $body;
+        } catch (\Exception $e) {
+            Log::error('💥 Korapay verification error: ' . $e->getMessage(), [
+                'reference' => $reference
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Handle Korapay webhook notification.
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function handleKorapayWebhook(Request $request)
+    {
+        try {
+            Log::info('🔄 Korapay webhook received', ['payload' => $request->all()]);
+
+            $event = $request->input('event');
+            $data = $request->input('data');
+
+            if ($event !== 'charge.success') {
+                Log::info('⏭️ Ignoring non-success Korapay webhook event', ['event' => $event]);
+                return response()->json(['status' => 'ignored'], 200);
+            }
+
+            $reference = $data['payment_reference'] ?? $data['reference'] ?? null;
+
+            if (!$reference) {
+                throw new \Exception('Missing reference in Korapay webhook');
+            }
+
+            $payment = Transaction::where('transaction_id', $reference)->first();
+
+            if (!$payment) {
+                Log::error('❌ Transaction not found for Korapay webhook', ['reference' => $reference]);
+                return response()->json(['status' => 'not_found'], 404);
+            }
+
+            if ($payment->status === 'completed') {
+                Log::info('✅ Korapay webhook: Payment already completed', ['transaction_id' => $payment->id]);
+                return response()->json(['status' => 'already_completed'], 200);
+            }
+
+            // Verify the payment server-side
+            $verification = $this->verifyKorapayPayment($reference);
+
+            if ($verification && $verification['status']) {
+                $korapayStatus = strtolower($verification['data']['status'] ?? '');
+
+                if ($korapayStatus === 'success') {
+                    $amountPaid = $verification['data']['amount'] ?? 0;
+                    $expectedAmount = $payment->amount;
+
+                    if (abs($amountPaid - $expectedAmount) > 0.01) {
+                        Log::error('❌ Korapay amount mismatch', [
+                            'paid' => $amountPaid,
+                            'expected' => $expectedAmount
+                        ]);
+                        return response()->json(['status' => 'amount_mismatch'], 400);
+                    }
+
+                    $payment->update([
+                        'status' => 'completed',
+                        'meta' => json_encode($verification['data'] ?? []),
+                    ]);
+
+                    $user = $payment->user;
+                    if ($user) {
+                        $user->balance += $payment->amount;
+                        $user->save();
+
+                        Log::info('💰 Korapay webhook: Balance credited', [
+                            'user_id' => $user->id,
+                            'amount' => $payment->amount,
+                            'new_balance' => $user->balance
+                        ]);
+
+                        $this->calculateAffiliateCommission($user, $payment->amount);
+                    }
+                } else {
+                    $payment->update(['status' => 'failed']);
+                    Log::info('❌ Korapay webhook: Payment failed', ['status' => $korapayStatus]);
+                }
+            }
+
+            return response()->json(['status' => 'processed'], 200);
+        } catch (\Exception $e) {
+            Log::error('💥 Korapay webhook error: ' . $e->getMessage(), [
+                'payload' => $request->all(),
+                'exception' => $e
+            ]);
+
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Initiate a manual payment (OPay bank transfer).
+     * Creates a pending transaction and notifies admin via email.
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function initiateManualPayment(Request $request)
+    {
+        try {
+            $validated = $request->validate([
+                'amount' => 'required|numeric|min:100',
+                'payment_method' => 'required|string|in:opay_manual',
+                'proof_method' => 'required|string|in:whatsapp,email',
+            ]);
+
+            $user = Auth::user();
+            $transactionRef = 'MAN_' . uniqid();
+
+            $payment = Transaction::create([
+                'user_id' => $user->id,
+                'transaction_id' => $transactionRef,
+                'amount' => $validated['amount'],
+                'currency' => $user->currency ?? 'NGN',
+                'charge' => 0.00,
+                'transaction_type' => 'deposit',
+                'description' => 'Manual deposit via OPay bank transfer (pending admin approval)',
+                'status' => 'pending',
+                'payment_method' => 'opay_manual',
+                'meta' => json_encode([
+                    'proof_method' => $validated['proof_method'],
+                    'user_email' => $user->email,
+                    'user_name' => ($user->first_name ?? '') . ' ' . ($user->last_name ?? ''),
+                ]),
+            ]);
+
+            Log::info('📝 Manual payment initiated', [
+                'transaction_id' => $transactionRef,
+                'user_id' => $user->id,
+                'amount' => $validated['amount'],
+                'proof_method' => $validated['proof_method'],
+            ]);
+
+            // Send admin email notification
+            try {
+                $adminEmail = config('mail.from.address');
+                $frontendUrl = rtrim(config('app.frontend_url', config('app.url')), '/');
+                $approveLink = $frontendUrl . '/admin/users/' . $user->id . '/transactions';
+
+                $emailBody = "
+                    <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 30px; background-color: #f8f9fa;'>
+                        <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 25px; border-radius: 12px 12px 0 0; text-align: center;'>
+                            <h1 style='color: white; margin: 0; font-size: 24px;'>💰 New Manual Payment</h1>
+                            <p style='color: rgba(255,255,255,0.85); margin: 8px 0 0 0;'>Pending Approval Required</p>
+                        </div>
+                        <div style='background: white; padding: 30px; border-radius: 0 0 12px 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08);'>
+                            <div style='background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin-bottom: 20px;'>
+                                <p style='margin: 0 0 5px 0; color: #666; font-size: 13px;'>Amount</p>
+                                <p style='margin: 0; font-size: 28px; font-weight: bold; color: #16a34a;'>₦" . number_format($validated['amount'], 2) . "</p>
+                            </div>
+                            <table style='width: 100%; border-collapse: collapse; margin-bottom: 20px;'>
+                                <tr style='border-bottom: 1px solid #f0f0f0;'>
+                                    <td style='padding: 12px 0; color: #666;'>Customer</td>
+                                    <td style='padding: 12px 0; text-align: right; font-weight: 600;'>{$user->first_name} {$user->last_name}</td>
+                                </tr>
+                                <tr style='border-bottom: 1px solid #f0f0f0;'>
+                                    <td style='padding: 12px 0; color: #666;'>Email</td>
+                                    <td style='padding: 12px 0; text-align: right; font-weight: 600;'>{$user->email}</td>
+                                </tr>
+                                <tr style='border-bottom: 1px solid #f0f0f0;'>
+                                    <td style='padding: 12px 0; color: #666;'>Reference</td>
+                                    <td style='padding: 12px 0; text-align: right; font-weight: 600; font-family: monospace;'>{$transactionRef}</td>
+                                </tr>
+                                <tr style='border-bottom: 1px solid #f0f0f0;'>
+                                    <td style='padding: 12px 0; color: #666;'>Proof via</td>
+                                    <td style='padding: 12px 0; text-align: right; font-weight: 600;'>" . ucfirst($validated['proof_method']) . "</td>
+                                </tr>
+                                <tr>
+                                    <td style='padding: 12px 0; color: #666;'>Payment Method</td>
+                                    <td style='padding: 12px 0; text-align: right; font-weight: 600;'>OPay Bank Transfer</td>
+                                </tr>
+                            </table>
+                            <a href='{$approveLink}' style='display: block; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;'>Review & Approve Transaction</a>
+                            <p style='text-align: center; color: #999; font-size: 12px; margin-top: 15px;'>Click the button above to go directly to the user's transactions page.</p>
+                        </div>
+                    </div>
+                ";
+
+                Mail::send([], [], function ($message) use ($adminEmail, $user, $validated, $transactionRef, $emailBody) {
+                    $message->to($adminEmail)
+                        ->subject('💰 New Manual Payment - ₦' . number_format($validated['amount'], 2) . ' from ' . $user->first_name . ' ' . $user->last_name)
+                        ->html($emailBody);
+                });
+
+                Log::info('📧 Admin notified about manual payment', [
+                    'admin_email' => $adminEmail,
+                    'transaction_ref' => $transactionRef,
+                ]);
+            } catch (\Exception $e) {
+                Log::warning('⚠️ Failed to send admin email for manual payment: ' . $e->getMessage());
+                // Don't fail the request if email fails
+            }
+
+            return response()->json([
+                'success' => true,
+                'transaction_id' => $transactionRef,
+                'message' => 'Manual payment recorded. Please submit your proof of payment.',
+            ]);
+        } catch (\Exception $e) {
+            Log::error('💥 Manual payment initiation failed: ' . $e->getMessage(), [
+                'user_id' => Auth::id(),
+                'exception' => $e
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to record manual payment: ' . $e->getMessage(),
+            ], 500);
         }
     }
 
