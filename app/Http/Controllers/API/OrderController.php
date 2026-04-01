@@ -187,11 +187,32 @@ class OrderController extends Controller
                         // Refund user for API failure
                         $user->increment('balance', $price);
 
+                        // Auto-correct min/max amounts if API reports quantity limits
+                        $userMessage = "Service provider error: {$apiError}";
+                        if (preg_match('/(?:quantity|Quantity)\s*(?:less than|below)\s*(?:minimal?|minimum)\s*(\d+)/i', $apiError, $matches)) {
+                            $apiMin = (int) $matches[1];
+                            if ($apiMin > $service->min_amount) {
+                                $service->update(['min_amount' => $apiMin]);
+                                Log::info("Auto-updated min_amount for service {$service->id} from {$service->min_amount} to {$apiMin}");
+                            }
+                            $userMessage = "Minimum quantity for this service is {$apiMin}. Please increase your quantity and try again.";
+                        } elseif (preg_match('/(?:quantity|Quantity)\s*(?:more than|above|exceeds?)\s*(?:max(?:imum)?|maximal?)\s*(\d+)/i', $apiError, $matches)) {
+                            $apiMax = (int) $matches[1];
+                            if ($apiMax < $service->max_amount) {
+                                $service->update(['max_amount' => $apiMax]);
+                                Log::info("Auto-updated max_amount for service {$service->id} from {$service->max_amount} to {$apiMax}");
+                            }
+                            $userMessage = "Maximum quantity for this service is {$apiMax}. Please decrease your quantity and try again.";
+                        }
+
+                        $order->save();
                         DB::commit();
 
                         return response()->json([
                             'status' => 'error',
-                            'message' => "Service provider error: {$apiError}"
+                            'message' => $userMessage,
+                            'min_amount' => $service->min_amount,
+                            'max_amount' => $service->max_amount,
                         ], 422);
                     }
                 } catch (\Exception $e) {

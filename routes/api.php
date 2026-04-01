@@ -211,6 +211,9 @@ Route::prefix('admin')->group(function () {
         Route::post('/services/deactivate-multiple', [ManageServiceController::class, 'deactivateMultiple']);
         Route::get('/orders', [ManageOrderController::class, 'allOrders']);
         Route::get('/orders/{id}', [ManageOrderController::class, 'show']);
+        Route::put('/orders/{id}', [ManageOrderController::class, 'update']);
+        Route::delete('/orders/{id}', [ManageOrderController::class, 'destroy']);
+        Route::patch('/orders/{id}/status', [ManageOrderController::class, 'updateStatus']);
 
 
         // API providers
